@@ -1,0 +1,112 @@
+name: update-cloudflared
+
+# 在 GitHub Actions 里下载官方 cloudflared（中国大陆机器直连 GitHub 会卡住），
+# 校验 SHA256 后推送到目标仓库，供 start.sh 里的
+#   https://raw.githubusercontent.com/<owner>/<repo>/main/bin/cf/cloudflared-linux-${arch}
+# 直接拉取。需要目标仓库的写权限：请在仓库 Settings -> Secrets 里配置
+#   CF_PUSH_TOKEN  : 有 repo 权限的 PAT（不要在 yml 里写死 token）
+#   CF_TARGET_REPO : 目标仓库，格式 owner/repo，例如 mygv001/xtun325
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository (owner/repo)'
+        required: false
+        type: string
+  push:
+    paths:
+      - 'pkg.json'
+      - '.github/workflows/update-cloudflared.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read version
+        id: meta
+        run: |
+          set -euo pipefail
+          VERSION=$(jq -r '.version' pkg.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "cloudflared version: $VERSION"
+
+      - name: Download and verify binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist amd64 arm64
+          for arch in amd64 arm64; do
+            url=$(jq -r ".bin_${arch}" pkg.json)
+            echo "downloading $arch from $url"
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "dist/cloudflared-linux-${arch}" "$url"
+
+            expect=$(curl -fsSL --retry 5 --retry-delay 3 \
+              "https://api.github.com/repos/cloudflare/cloudflared/releases/tags/${{ steps.meta.outputs.version }}" \
+              | jq -r --arg n "cloudflared-linux-${arch}" '.assets[] | select(.name==$n) | .digest' \
+              | sed 's/^sha256://')
+            actual=$(sha256sum "dist/cloudflared-linux-${arch}" | cut -d' ' -f1)
+            echo "$arch expected=$expect actual=$actual"
+            if [ -z "$expect" ] || [ "$expect" != "$actual" ]; then
+              echo "checksum mismatch for $arch" >&2
+              exit 1
+            fi
+            file "dist/cloudflared-linux-${arch}"
+            chmod +x "dist/cloudflared-linux-${arch}"
+          done
+
+      - name: Self-test (amd64 only)
+        run: |
+          set -euo pipefail
+          ./dist/cloudflared-linux-amd64 --version
+
+      - name: Push to target repository
+        env:
+          PUSH_TOKEN: ${{ secrets.CF_PUSH_TOKEN }}
+          TARGET_REPO: ${{ github.event.inputs.target_repo || secrets.CF_TARGET_REPO }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUSH_TOKEN:-}" ] || [ -z "${TARGET_REPO:-}" ]; then
+            echo "CF_PUSH_TOKEN / CF_TARGET_REPO 未配置，跳过推送（仅产出 Artifact）"
+            exit 0
+          fi
+          # 目标为公开仓库，优先匿名拉取；匿名失败再用 token
+          git clone --depth 1 "https://x-access-token:${PUSH_TOKEN}@github.com/${TARGET_REPO}.git" target
+          cd target
+          mkdir -p bin/cf bin/amd64 bin/arm64
+          for arch in amd64 arm64; do
+            src="../dist/cloudflared-linux-${arch}"
+            cp "$src" "bin/cf/cloudflared-linux-${arch}"
+            cp "$src" "bin/cf/cf-${arch}"
+            cp "$src" "bin/${arch}/cf"
+          done
+          cp ../dist/cloudflared-linux-amd64 "bin/amd64/bot"
+          {
+            echo "cloudflared ${VERSION}"
+            echo "cloudflared-linux-amd64  sha256 $(sha256sum ../dist/cloudflared-linux-amd64  | cut -d' ' -f1)"
+            echo "cloudflared-linux-arm64  sha256 $(sha256sum ../dist/cloudflared-linux-arm64  | cut -d' ' -f1)"
+            echo "updated $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > bin/cf/VERSION
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A bin
+          if git diff --cached --quiet; then
+            echo "no change, nothing to push"
+            exit 0
+          fi
+          git commit -m "bin: update cloudflared to ${VERSION} (amd64 + arm64)"
+          git push origin HEAD:main
+
+      - name: Upload artifact (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflared-linux-${{ steps.meta.outputs.version }}
+          path: dist/
+          retention-days: 14
