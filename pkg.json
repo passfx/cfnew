@@ -1,0 +1,18 @@
+{
+    "version":  "2026.10.4",
+    "bin_amd64":  "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-amd64",
+    "arch":  [
+                 "amd64",
+                 "arm64"
+             ],
+    "upver":  1,
+    "name":  "cloudflared-linux-bin",
+    "description":  "Auto-rebuild cloudflared Linux binaries (2026.10.4 - amd64 + arm64) for the xtun325 download script",
+    "targets":  [
+                    "bin/cf/cloudflared-linux-${arch}",
+                    "bin/cf/cf-${arch}",
+                    "bin/${arch}/cf",
+                    "bin/${arch}/bot"
+                ],
+    "bin_arm64":  "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-arm64"
+}
